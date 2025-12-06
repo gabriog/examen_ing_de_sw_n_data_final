@@ -3,6 +3,8 @@
 airflow.cfg
 airflow.db
 simple_auth_manager_passwords.json.generated
+airflow.*
+airflow_home
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
