@@ -1,3 +1,6 @@
+# dbt 
+profiles/.user.yml
+
 # Warehouse
 warehouse/medallion.duckdb
 
