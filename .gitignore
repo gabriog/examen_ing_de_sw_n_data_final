@@ -1,3 +1,6 @@
+# Warehouse
+warehouse/medallion.duckdb
+
 # Airflow .gitignore
 
 airflow.cfg
