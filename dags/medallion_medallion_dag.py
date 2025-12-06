@@ -115,21 +115,24 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     df_clean.to_parquet(clean_path, index=False)
 
 
-# --- NUEVO: función para correr dbt run ---
+# --- GOLD / SILVER: función para correr dbt run ---
 def _run_dbt_models(ds_nodash: str, **_context) -> None:
     """
     Ejecuta `dbt run` usando ds_nodash para que los modelos
     puedan leer el parquet limpio correcto.
 
     - Usa _run_dbt_command("run", ds_nodash)
-    - Guarda stdout/stderr en data/quality/dbt_run_<ds_nodash>.log
+    - Guarda stdout/stderr en:
+        data/quality/dbt_run_<ds_nodash>.log
+    - Genera un archivo JSON de data quality:
+        data/quality/dq_results_<ds_nodash>.json
     - Lanza AirflowException si dbt devuelve código distinto de 0
     """
     QUALITY_DIR.mkdir(parents=True, exist_ok=True)
 
     result = _run_dbt_command("run", ds_nodash)
 
-    # Guardamos log de dbt en data/quality
+    # Log plano de dbt (por si queremos inspección manual)
     log_path = QUALITY_DIR / f"dbt_run_{ds_nodash}.log"
     log_contents = (
         "Command: dbt run\n"
@@ -139,10 +142,57 @@ def _run_dbt_models(ds_nodash: str, **_context) -> None:
     )
     log_path.write_text(log_contents)
 
+    # JSON de data quality para observabilidad (capa gold)
+    dq_path = QUALITY_DIR / f"dq_results_{ds_nodash}.json"
+    dq_payload = {
+        "ds_nodash": ds_nodash,
+        "status": "passed" if result.returncode == 0 else "failed",
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    dq_path.write_text(json.dumps(dq_payload, indent=2))
+
     if result.returncode != 0:
         raise AirflowException(
             f"dbt run failed for ds_nodash={ds_nodash}. "
-            f"See log file: {log_path}"
+            f"See log file: {log_path} and dq file: {dq_path}"
+        )
+
+
+# --- GOLD / OBSERVABILITY: chequear archivo de data quality ---
+def _check_data_quality(ds_nodash: str, **_context) -> None:
+    """
+    Verifica la existencia y el contenido del archivo de data quality:
+
+      data/quality/dq_results_<ds_nodash>.json
+
+    Reglas:
+      - El archivo debe existir.
+      - Debe ser JSON válido.
+      - El campo "status" debe ser "passed".
+
+    Si alguna condición falla → AirflowException.
+    """
+    dq_path = QUALITY_DIR / f"dq_results_{ds_nodash}.json"
+
+    if not dq_path.exists():
+        raise AirflowException(
+            f"Data quality file not found: {dq_path}. "
+            "Expected after dbt run."
+        )
+
+    try:
+        dq_data = json.loads(dq_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise AirflowException(
+            f"Data quality file is not valid JSON: {dq_path}"
+        ) from exc
+
+    status = dq_data.get("status")
+    if status != "passed":
+        raise AirflowException(
+            f"Data quality check failed for ds_nodash={ds_nodash}. "
+            f"Status in {dq_path} is '{status}'."
         )
 
 
@@ -171,8 +221,16 @@ def build_dag() -> DAG:
             op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
         )
 
-        # Dependencias: primero limpiamos, luego corremos dbt
-        clean_transactions >> run_dbt_models
+        # Task: observabilidad / data quality (gold)
+        check_data_quality = PythonOperator(
+            task_id="check_data_quality",
+            python_callable=_check_data_quality,
+            op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+        )
+
+        # Dependencias:
+        # Bronze -> Silver/Gold (dbt) -> Gold observabilidad (DQ)
+        clean_transactions >> run_dbt_models >> check_data_quality
 
     return medallion_dag
 

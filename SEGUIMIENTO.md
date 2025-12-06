@@ -49,3 +49,13 @@ Verificamos que los datos se encuentren en el warehouse con una consulta SQL:
 duckcli warehouse/medallion.duckdb
 SELECT * FROM ventas_clean;
 ```
+
+## Airflow + dbt
+
+Si todo lo anterior funciona correctamente, completamos el DAG.
+
+Queda pendiente: 
+- [ ] Completar seccion airflow + dbt 
+- [ ] Agregar 2 tests en dbt/tests/.
+- [ ] Hacer formato y linting
+- [ ] Unificar README y SEGUIMIENTO.md
