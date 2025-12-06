@@ -66,7 +66,7 @@ def _run_dbt_command(command: str, ds_nodash: str) -> subprocess.CompletedProces
     )
 
 
-#  Función de limpieza bronze -> clean CSV 
+#  Función de limpieza bronze -> clean CSV -> parquet limpio
 def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     """
     Limpia el archivo transactions_{ds}.csv o transactions_{ds_nodash}.csv:
@@ -77,8 +77,6 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     - Escribe el resultado en data/clean/ como parquet:
         transactions_<ds_nodash>_clean.parquet
     """
-    import pandas as pd
-
     # ds_nodash viene como YYYYMMDD → generamos YYYY-MM-DD para posibles archivos
     ds = datetime.strptime(ds_nodash, "%Y%m%d").date().isoformat()  # YYYY-MM-DD
 
@@ -117,6 +115,36 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     df_clean.to_parquet(clean_path, index=False)
 
 
+# --- NUEVO: función para correr dbt run ---
+def _run_dbt_models(ds_nodash: str, **_context) -> None:
+    """
+    Ejecuta `dbt run` usando ds_nodash para que los modelos
+    puedan leer el parquet limpio correcto.
+
+    - Usa _run_dbt_command("run", ds_nodash)
+    - Guarda stdout/stderr en data/quality/dbt_run_<ds_nodash>.log
+    - Lanza AirflowException si dbt devuelve código distinto de 0
+    """
+    QUALITY_DIR.mkdir(parents=True, exist_ok=True)
+
+    result = _run_dbt_command("run", ds_nodash)
+
+    # Guardamos log de dbt en data/quality
+    log_path = QUALITY_DIR / f"dbt_run_{ds_nodash}.log"
+    log_contents = (
+        "Command: dbt run\n"
+        f"Return code: {result.returncode}\n\n"
+        f"STDOUT:\n{result.stdout}\n\n"
+        f"STDERR:\n{result.stderr}\n"
+    )
+    log_path.write_text(log_contents)
+
+    if result.returncode != 0:
+        raise AirflowException(
+            f"dbt run failed for ds_nodash={ds_nodash}. "
+            f"See log file: {log_path}"
+        )
+
 
 def build_dag() -> DAG:
     """Construct the medallion pipeline DAG with bronze/silver/gold tasks."""
@@ -136,21 +164,15 @@ def build_dag() -> DAG:
             op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
         )
 
-        # TODO (cuando avances):
-        # * Agregar las tasks necesarias del pipeline para completar lo pedido por el enunciado.
-        # * Usar PythonOperator con el argumento op_kwargs para pasar ds_nodash a las funciones.
-        #   De modo que cada task pueda trabajar con la fecha de ejecución correspondiente.
-        # Recomendaciones:
-        #  * Pasar el argumento ds_nodash a las funciones definidas arriba.
-        #    ds_nodash contiene la fecha de ejecución en formato YYYYMMDD sin guiones.
-        #    Utilizarlo para que cada task procese los datos del dia correcto y los archivos
-        #    de salida tengan nombres únicos por fecha.
-        #  * Asegurarse de que los paths usados en las funciones sean relativos a BASE_DIR.
-        #  * Usar las funciones definidas arriba para cada etapa del pipeline.
+        # Task: correr dbt run usando el parquet limpio (silver/gold)
+        run_dbt_models = PythonOperator(
+            task_id="run_dbt_models",
+            python_callable=_run_dbt_models,
+            op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+        )
 
-        # Por ahora solo tenemos una task, así que no seteamos dependencias.
-        # Más adelante podés hacer:
-        # clean_transactions >> otra_task
+        # Dependencias: primero limpiamos, luego corremos dbt
+        clean_transactions >> run_dbt_models
 
     return medallion_dag
 
