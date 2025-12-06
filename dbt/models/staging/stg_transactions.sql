@@ -8,4 +8,12 @@ with source as (
     )
 )
 
--- TODO: Completar el modelo para que cree la tabla staging con los tipos adecuados segun el schema.yml.
+-- Select and rename columns to match schema.yml
+select
+    transaction_id,
+    customer_id,
+    amount::double as amount,
+    status,
+    transaction_ts::timestamp as transaction_ts,
+    date_trunc('day', transaction_ts::timestamp)::date as transaction_date
+from source
