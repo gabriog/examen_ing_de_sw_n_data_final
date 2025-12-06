@@ -3,6 +3,10 @@ profiles/.user.yml
 
 # Warehouse
 warehouse/medallion.duckdb
+data/clean/*
+data/clean/*
+data/quality/*
+
 
 # Airflow .gitignore
 

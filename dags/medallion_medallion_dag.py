@@ -8,11 +8,12 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+import pandas as pd
 
 import pendulum
 from airflow import DAG
 from airflow.exceptions import AirflowException
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 # pylint: disable=import-error,wrong-import-position
 
@@ -65,9 +66,47 @@ def _run_dbt_command(command: str, ds_nodash: str) -> subprocess.CompletedProces
     )
 
 
-# TODO: Definir las funciones necesarias para cada etapa del pipeline
-#  (bronze, silver, gold) usando las funciones de transformación y
-#  los comandos de dbt.
+# --- NUEVO: función de limpieza bronze -> clean CSV ---
+def _clean_transactions_file(ds_nodash: str, **_context) -> None:
+    """
+    Limpia el archivo transactions_{ds}.csv o transactions_{ds_nodash}.csv:
+
+    - Busca primero transactions_YYYY-MM-DD.csv
+      y luego transactions_YYYYMMDD.csv en data/raw/
+    - Elimina filas con amount nulo
+    - Escribe el resultado en data/clean/ con el mismo nombre de archivo
+    """
+    # ds_nodash viene como YYYYMMDD
+    ds = datetime.strptime(ds_nodash, "%Y%m%d").date().isoformat()  # YYYY-MM-DD
+
+    # Probar ambas variantes de nombre
+    candidates = [
+        RAW_DIR / f"transactions_{ds}.csv",        # transactions_YYYY-MM-DD.csv
+        RAW_DIR / f"transactions_{ds_nodash}.csv"  # transactions_YYYYMMDD.csv
+    ]
+
+    raw_path = None
+    for path in candidates:
+        if path.exists():
+            raw_path = path
+            break
+
+    if raw_path is None:
+        tried = ", ".join(str(p) for p in candidates)
+        raise AirflowException(f"Raw file not found. Tried: {tried}")
+
+    clean_path = CLEAN_DIR / raw_path.name
+
+    df = pd.read_csv(raw_path)
+
+    if "amount" not in df.columns:
+        raise AirflowException("Column 'amount' not found in raw transactions file")
+
+    # Filtramos filas donde amount NO es nulo
+    df_clean = df[df["amount"].notna()]
+
+    CLEAN_DIR.mkdir(parents=True, exist_ok=True)
+    df_clean.to_csv(clean_path, index=False)
 
 
 def build_dag() -> DAG:
@@ -81,8 +120,14 @@ def build_dag() -> DAG:
         max_active_runs=1,
     ) as medallion_dag:
 
+        # Task: limpiar archivo transactions_{ds}.csv (bronze -> clean)
+        clean_transactions = PythonOperator(
+            task_id="clean_transactions_file",
+            python_callable=_clean_transactions_file,
+            op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+        )
 
-        # TODO:
+        # TODO (cuando avances):
         # * Agregar las tasks necesarias del pipeline para completar lo pedido por el enunciado.
         # * Usar PythonOperator con el argumento op_kwargs para pasar ds_nodash a las funciones.
         #   De modo que cada task pueda trabajar con la fecha de ejecución correspondiente.
@@ -94,7 +139,9 @@ def build_dag() -> DAG:
         #  * Asegurarse de que los paths usados en las funciones sean relativos a BASE_DIR.
         #  * Usar las funciones definidas arriba para cada etapa del pipeline.
 
-
+        # Por ahora solo tenemos una task, así que no seteamos dependencias.
+        # Más adelante podés hacer:
+        # clean_transactions >> otra_task
 
     return medallion_dag
 
