@@ -66,7 +66,7 @@ def _run_dbt_command(command: str, ds_nodash: str) -> subprocess.CompletedProces
     )
 
 
-# --- NUEVO: función de limpieza bronze -> clean CSV ---
+#  Función de limpieza bronze -> clean CSV 
 def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     """
     Limpia el archivo transactions_{ds}.csv o transactions_{ds_nodash}.csv:
@@ -74,9 +74,12 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     - Busca primero transactions_YYYY-MM-DD.csv
       y luego transactions_YYYYMMDD.csv en data/raw/
     - Elimina filas con amount nulo
-    - Escribe el resultado en data/clean/ con el mismo nombre de archivo
+    - Escribe el resultado en data/clean/ como parquet:
+        transactions_<ds_nodash>_clean.parquet
     """
-    # ds_nodash viene como YYYYMMDD
+    import pandas as pd
+
+    # ds_nodash viene como YYYYMMDD → generamos YYYY-MM-DD para posibles archivos
     ds = datetime.strptime(ds_nodash, "%Y%m%d").date().isoformat()  # YYYY-MM-DD
 
     # Probar ambas variantes de nombre
@@ -95,8 +98,10 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
         tried = ", ".join(str(p) for p in candidates)
         raise AirflowException(f"Raw file not found. Tried: {tried}")
 
-    clean_path = CLEAN_DIR / raw_path.name
+    # Nuevo nombre del parquet limpio
+    clean_path = CLEAN_DIR / f"transactions_{ds_nodash}_clean.parquet"
 
+    # Leer CSV
     df = pd.read_csv(raw_path)
 
     if "amount" not in df.columns:
@@ -105,8 +110,12 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     # Filtramos filas donde amount NO es nulo
     df_clean = df[df["amount"].notna()]
 
+    # Crear carpeta clean si no existe
     CLEAN_DIR.mkdir(parents=True, exist_ok=True)
-    df_clean.to_csv(clean_path, index=False)
+
+    # Guardar parquet
+    df_clean.to_parquet(clean_path, index=False)
+
 
 
 def build_dag() -> DAG:

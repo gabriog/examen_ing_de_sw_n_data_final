@@ -21,3 +21,7 @@ dbt debug
 dbt run --vars "{ds: '20251206'}"
 ```
 
+Generalizamos el PATH para CLEAN en dbt_project.yml:
+```bash
+clean_dir: "{{ env_var('CLEAN_DIR', project_root ~ '/../data/clean') }}"
+```
