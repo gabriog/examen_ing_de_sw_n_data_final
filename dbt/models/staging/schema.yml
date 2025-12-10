@@ -22,6 +22,7 @@ models:
         description: "Normalized status flag from the source system."
         tests:
           - not_null
+          - not_empty_string
           - accepted_values:
               values:
                 - completed
@@ -35,3 +36,4 @@ models:
         description: "Date component derived from transaction_ts for partitioning/grouping."
         tests:
           - not_null
+          - not_future_date

@@ -8,11 +8,11 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-import pandas as pd
 
+import pandas as pd
 import pendulum
 from airflow import DAG
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowSkipException
 from airflow.providers.standard.operators.python import PythonOperator
 
 # pylint: disable=import-error,wrong-import-position
@@ -66,6 +66,37 @@ def _run_dbt_command(command: str, ds_nodash: str) -> subprocess.CompletedProces
     )
 
 
+# --- VERIFICACIÓN: chequear existencia de archivo raw ---
+def _check_file_exists(ds_nodash: str, **_context) -> None:
+    """
+    Verifica si existe el archivo raw para la fecha indicada.
+
+    Si no existe, lanza AirflowSkipException para saltear el pipeline.
+    Si existe, no hace nada y permite continuar.
+    """
+    # ds_nodash viene como YYYYMMDD → generamos YYYY-MM-DD para posibles archivos
+    ds = datetime.strptime(ds_nodash, "%Y%m%d").date().isoformat()  # YYYY-MM-DD
+
+    # Probar ambas variantes de nombre
+    candidates = [
+        RAW_DIR / f"transactions_{ds}.csv",  # transactions_YYYY-MM-DD.csv
+        RAW_DIR / f"transactions_{ds_nodash}.csv",  # transactions_YYYYMMDD.csv
+    ]
+
+    # Verificar si existe algún archivo
+    for path in candidates:
+        if path.exists():
+            # Archivo encontrado, continuar normalmente
+            return
+
+    # No se encontró ningún archivo, saltear el pipeline
+    tried = ", ".join(str(p) for p in candidates)
+    raise AirflowSkipException(
+        f"No raw file found for date {ds_nodash}. Tried: {tried}. "
+        "Skipping pipeline for this date."
+    )
+
+
 #  Función de limpieza bronze -> clean CSV -> parquet limpio
 def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     """
@@ -80,10 +111,10 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
     # ds_nodash viene como YYYYMMDD → generamos YYYY-MM-DD para posibles archivos
     ds = datetime.strptime(ds_nodash, "%Y%m%d").date().isoformat()  # YYYY-MM-DD
 
-    # Probar ambas variantes de nombre
+    # Probar ambas variantes de nombre (la tarea anterior ya verificó que existe)
     candidates = [
-        RAW_DIR / f"transactions_{ds}.csv",        # transactions_YYYY-MM-DD.csv
-        RAW_DIR / f"transactions_{ds_nodash}.csv"  # transactions_YYYYMMDD.csv
+        RAW_DIR / f"transactions_{ds}.csv",  # transactions_YYYY-MM-DD.csv
+        RAW_DIR / f"transactions_{ds_nodash}.csv",  # transactions_YYYYMMDD.csv
     ]
 
     raw_path = None
@@ -92,9 +123,14 @@ def _clean_transactions_file(ds_nodash: str, **_context) -> None:
             raw_path = path
             break
 
+    # Esta verificación no debería fallar porque _check_file_exists ya lo verificó
+    # pero la dejamos por seguridad
     if raw_path is None:
         tried = ", ".join(str(p) for p in candidates)
-        raise AirflowException(f"Raw file not found. Tried: {tried}")
+        raise AirflowException(
+            f"Raw file not found. Tried: {tried}. "
+            "This should not happen if check_file_exists ran successfully."
+        )
 
     # Nuevo nombre del parquet limpio
     clean_path = CLEAN_DIR / f"transactions_{ds_nodash}_clean.parquet"
@@ -177,8 +213,7 @@ def _check_data_quality(ds_nodash: str, **_context) -> None:
 
     if not dq_path.exists():
         raise AirflowException(
-            f"Data quality file not found: {dq_path}. "
-            "Expected after dbt run."
+            f"Data quality file not found: {dq_path}. " "Expected after dbt run."
         )
 
     try:
@@ -207,11 +242,19 @@ def build_dag() -> DAG:
         max_active_runs=1,
     ) as medallion_dag:
 
+        # Task: verificar si existe el archivo raw para la fecha
+        check_file = PythonOperator(
+            task_id="check_raw_file_exists",
+            python_callable=_check_file_exists,
+            op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+        )
+
         # Task: limpiar archivo transactions_{ds}.csv (bronze -> clean)
         clean_transactions = PythonOperator(
             task_id="clean_transactions_file",
             python_callable=_clean_transactions_file,
             op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+            trigger_rule="none_failed_min_one_success",
         )
 
         # Task: correr dbt run usando el parquet limpio (silver/gold)
@@ -219,6 +262,7 @@ def build_dag() -> DAG:
             task_id="run_dbt_models",
             python_callable=_run_dbt_models,
             op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+            trigger_rule="none_failed_min_one_success",
         )
 
         # Task: observabilidad / data quality (gold)
@@ -226,11 +270,12 @@ def build_dag() -> DAG:
             task_id="check_data_quality",
             python_callable=_check_data_quality,
             op_kwargs={"ds_nodash": "{{ ds_nodash }}"},
+            trigger_rule="none_failed_min_one_success",
         )
 
         # Dependencias:
-        # Bronze -> Silver/Gold (dbt) -> Gold observabilidad (DQ)
-        clean_transactions >> run_dbt_models >> check_data_quality
+        # Verificar archivo -> Bronze -> Silver/Gold (dbt) -> Gold observabilidad (DQ)
+        check_file >> clean_transactions >> run_dbt_models >> check_data_quality
 
     return medallion_dag
 
