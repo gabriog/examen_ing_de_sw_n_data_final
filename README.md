@@ -5,6 +5,9 @@ Este proyecto crea un pipeline de 3 pasos que replica la arquitectura medallion:
 1. **Bronze**: Airflow lee un CSV crudo según la fecha de ejecución y aplica una limpieza básica con Pandas guardando un archivo parquet limpio.
 2. **Silver**: Un `dbt run` carga el parquet en DuckDB y genera modelos intermedios.
 3. **Gold**: `dbt test` valida la tabla final y escribe un archivo con el resultado de los data quality checks.
+4. **Extra**: Al comienzo se agrega una verificación de existencia sobre el raw file del día donde se hace trigger del DAG.
+
+![images/dag_diagram.png](images/dag_diagram.png)
 
 ## Estructura
 
@@ -211,20 +214,20 @@ isort dags include && black dags include && pylint dags/*.py include/*.py
 
 Necesarios para completar el workflow:
 
-- [ ] Implementar tareas de Airflow.
-- [ ] Implementar modelos de dbt según cada archivo schema.yml.
-- [ ] Implementar pruebas de dbt para asegurar que las tablas gold estén correctas.
-- [ ] Documentar mejoras posibles para el proceso considerado aspectos de escalabilidad y modelado de datos.
+- [x] Implementar tareas de Airflow.
+- [x] Implementar modelos de dbt según cada archivo schema.yml.
+- [x] Implementar pruebas de dbt para asegurar que las tablas gold estén correctas.
+- [x] Documentar mejoras posibles para el proceso considerado aspectos de escalabilidad y modelado de datos.
 
 Nice to have:
 
-- [ ] Manejar el caso que no haya archivos para el dia indicado.
+- [x] Manejar el caso que no haya archivos para el dia indicado.
 
 ---
 
 ## Resolución de TODOs
 
-### ✅ Implementar tareas de Airflow
+###  Implementar tareas de Airflow
 
 El DAG `medallion_pipeline` fue implementado utilizando 4 tareas que procesan datos de forma secuencial:
 
@@ -238,7 +241,7 @@ El DAG `medallion_pipeline` fue implementado utilizando 4 tareas que procesan da
 
 Todas las tareas downstream usan `trigger_rule="none_failed_min_one_success"` para manejar correctamente los casos donde la primera tarea se saltea por falta de datos.
 
-### ✅ Implementar modelos de dbt según cada archivo schema.yml
+###  Implementar modelos de dbt según cada archivo schema.yml
 
 Se crearon dos modelos dbt que procesan los datos en capas:
 
@@ -258,7 +261,7 @@ Se crearon dos modelos dbt que procesan los datos en capas:
 
 Esta separación en dos capas hace que sea más fácil mantener el código y agregar nuevas fuentes de datos en el futuro.
 
-### ✅ Implementar pruebas de dbt para asegurar que las tablas gold estén correctas
+###  Implementar pruebas de dbt para asegurar que las tablas gold estén correctas
 
 Se implementaron tests de calidad de datos en dos niveles:
 
@@ -273,7 +276,7 @@ Se implementaron tests de calidad de datos en dos niveles:
 - **Staging**: Validación estricta en el punto de entrada (uniqueness, not_null, non_negative, accepted_values, not_future_date, not_empty_string)
 - **Marts**: Tests básicos sobre métricas derivadas (not_null, non_negative)
 
-### ✅ Documentar mejoras posibles para el proceso considerando aspectos de escalabilidad y modelado de datos
+###  Documentar mejoras posibles para el proceso considerando aspectos de escalabilidad y modelado de datos
 
 **1. Procesar más datos**:
 
@@ -290,13 +293,15 @@ Se implementaron tests de calidad de datos en dos niveles:
 - Enviar métricas a Grafana para visualizar el estado del pipeline en dashboards.
 - Configurar alertas en Slack cuando fallen los tests de calidad.
 
-### ✅ Manejar el caso que no haya archivos para el día indicado
+###  Manejar el caso que no haya archivos para el día indicado
 
 Se implementó utilizando las capacidades nativas de Airflow:
 
 La tarea `check_raw_file_exists` verifica la existencia del archivo raw antes de iniciar el procesamiento. Si el archivo no existe, lanza `AirflowSkipException` con un mensaje informativo indicando qué archivos se buscaron. Esto marca la tarea como "skipped" en lugar de "failed".
 
 Las tareas downstream (`clean_transactions_file`, `run_dbt_models`, `check_data_quality`) están configuradas con `trigger_rule="none_failed_min_one_success"`, lo que les permite saltearse automáticamente cuando la tarea anterior se saltea.
+
+IMPORTANTE: *Los dags son ejecutados en horario UTC. Si ejecutamos un DAG a las 21:00 horario Argentina, Airflow en la UI hará la ejecución +3hs, es decir, 00:00 del día próximo, por lo tanto, no encontrará el archivo del día actual, buscará el del día siguiente.*
 
 ---
 
